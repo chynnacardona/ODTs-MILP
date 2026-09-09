@@ -94,6 +94,22 @@ This table highlights the structural differences between naive Gurobi MILP imple
 | **Linearized Error Formulation** | `e >= z - c` $(y_i = 1)$<br>`e >= c + z - 1` $(y_i = 0)$ | $e_{i, l} \ge z_{i, l} - c_l \quad (y_i = 1)$<br>$e_{i, l} \ge c_l + z_{i, l} - 1 \quad (y_i = 0)$ | **Exact Alignment:** Algebraically replaces non-linear error products $e_{i, l} = \|y_i - c_l\| \cdot z_{i, l}$ with linear lower bounds. |
 | **Parent-Child Hierarchy** | `quicksum(d[t]) <= quicksum(d[parent])` | $\sum_{j=1}^{P} d_{t, j} \le \sum_{j=1}^{P} d_{p, j} \quad \forall t \in B \setminus \{0\}$ | **Exact Alignment:** Enforces tree structural integrity by deactivating child node splits ($d_{t, j} = 0$) if the parent branch is inactive. |
 | **Sample Leaf Allocation** | `gp.quicksum(z[i, l] for l in leaves) == 1` | $\sum_{l \in L} z_{i, l} = 1 \quad \forall i \in \{1, \dots, N\}$ | **Exact Alignment:** Guarantees every observation $i$ is routed to exactly one leaf node $l$. |
+  
+## 📄 Code vs. Paper Formulation (Bertsimas & Dunn, 2017)
 
+This section details how the Gurobi Python implementation maps to the original mathematical formulation presented in *Optimal Classification Trees* (Bertsimas & Dunn, 2017).
+  ---
+  
+### 📊 Structural & Constraint Comparison
 
-
+| Mathematical Concept | Paper Equation | Python Code Equivalent | Implementation Notes & Differences |
+| :--- | :--- | :--- | :--- |
+| **Node Indexing** | $t \in \mathcal{T}_B = \{1, \dots, \lfloor T/2 \rfloor\}$<br>$t \in \mathcal{T}_L = \{\lfloor T/2 \rfloor + 1, \dots, T\}$ | `branches = list(range(num_branches))` <br> `leaves = list(range(...))` | The paper utilizes **1-based indexing** ($1 \dots T$), whereas the Python implementation uses standard **0-based indexing** ($0 \dots 2^{D+1}-2$). |
+| **Feature Selection** | $\sum_{j=1}^{p} a_{jt} = d_t, \quad \forall t \in \mathcal{T}_B$<br>*(Eq. 2)* | `d = model.addVars(branches, P, vtype=GRB.BINARY)`<br>`gp.quicksum(d[t, j] for j in range(P)) <= 1` | The paper explicitly separates feature choice $a_{jt} \in \{0, 1\}$ and split flag $d_t \in \{0, 1\}$. The code collapses both into a single 2D binary variable $d_{t, j}$. |
+| **Parent Hierarchy** | $d_t \le d_{p(t)}, \quad \forall t \in \mathcal{T}_B \setminus \{1\}$<br>*(Eq. 5)* | `gp.quicksum(d[t, j]) <= gp.quicksum(d[parent, j])` | **Exact Alignment:** Enforces that a child node cannot execute a split unless its parent node has already split. |
+| **Leaf Allocation** | $\sum_{t \in \mathcal{T}_L} z_{it} = 1, \quad \forall i=1 \dots n$<br>*(Eq. 8)* | `gp.quicksum(z[i, l] for l in leaves) == 1` | **Exact Alignment:** Guarantees every observation $i$ is routed to exactly one leaf node. |
+| **Left Ancestor Routing** | $\mathbf{a}_m^T(\mathbf{x}_i + \boldsymbol{\epsilon}) \le b_m + (1 + \epsilon_{\max})(1 - z_{it})$<br>*(Eq. 13)* | `gp.quicksum(d[t, j] * X[i, j]) <= b[t] + M * (1 - z[i, l])` | The paper derives feature-specific tolerances $\epsilon_j$ and tight Big-$M$ bounds ($1 + \epsilon_{\max}$). The code applies a dynamic scalar $M = \max(\lvert X \rvert) + 5.0$. |
+| **Right Ancestor Routing** | $\mathbf{a}_m^T \mathbf{x}_i \ge b_m - (1 - z_{it})$<br>*(Eq. 14)* | `gp.quicksum(d[t, j] * X[i, j]) >= b[t] - M * (1 - z[i, l])` | The paper assumes normalized features $\mathbf{x}_i \in [0, 1]^P$ (setting $M_2 = 1$). The code uses dynamic $M$ scaling to handle unnormalized feature values. |
+| **Misclassification Loss** | $L_t = N_t - \max_k \{N_{kt}\}$<br>*(Eq. 19–22)* | `e[i, l] >= z[i, l] - c[l]` $(y_i = 1)$<br>`e[i, l] >= c[l] + z[i, l] - 1` $(y_i = 0)$ | The paper computes class distribution counts $N_{kt}$ per leaf. The code uses sample-level binary error variables $e_{i, l}$ tailored for binary classification ($K=2$). |
+| **Objective Function** | $\min \frac{1}{\hat{L}} \sum_{t \in \mathcal{T}_L} L_t + \alpha \sum_{t \in \mathcal{T}_B} d_t$<br>*(Eq. 24)* | `model.setObjective(misclass_error + tree_complexity, GRB.MINIMIZE)` | The paper scales the classification loss by baseline error $\hat{L}$. The code minimizes raw total misclassifications plus the complexity penalty $\alpha \sum d_{t, j}$. |
+| **Minimum Leaf Size** | $\sum_{i=1}^n z_{it} \ge N_{\min} l_t, \quad \forall t \in \mathcal{T}_L$<br>*(Eq. 7)* | *Omitted in current Python code* | **Paper Constraint Omitted:** The paper enforces a minimum sample count threshold $N_{\min}$ per active leaf node using binary leaf indicators $l_t$. |
