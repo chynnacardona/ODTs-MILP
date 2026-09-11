@@ -1,4 +1,4 @@
-# Optimal Classification Trees (OCT) via MILP in Gurobi -- GLOBAL TREE OPTIMIZATION
+# SECTION 2.2: Base OCT MIO formulation
 
 Python Implementation -- "EQ1_GlobalTreeOptimization" ()
 
