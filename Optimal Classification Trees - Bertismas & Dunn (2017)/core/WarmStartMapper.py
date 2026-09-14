@@ -1,6 +1,5 @@
 import numpy as np
 
-
 class WarmStartMapper:
     """
     Translates a fitted greedy decision tree (e.g., scikit-learn DecisionTreeClassifier)
@@ -21,17 +20,15 @@ class WarmStartMapper:
         self.leaf_nodes = list(range(self.n_branch_nodes + 1, self.num_nodes + 1))
 
     def extract_cart_parameters(self, cart_model, X_train: np.ndarray):
-        """
-        Extracts structural decision properties from a trained sklearn DecisionTreeClassifier.
-        """
+        #  Extracts structural decision properties from a trained sklearn DecisionTreeClassifier. Accesses scikit-learn's underlying C-based binary tree structure.
         tree_ = cart_model.tree_
 
-        # Variables to populate
+        # Variables to populate. Initializes zeroed-out dictionaries for MIP warm-start variables:
         a_init = {
             (t, j): 0.0
             for t in self.branch_nodes
             for j in range(self.n_features)
-        }
+        } #
         b_init = {t: 0.0 for t in self.branch_nodes}
         d_init = {t: 0 for t in self.branch_nodes}
         c_init = {
