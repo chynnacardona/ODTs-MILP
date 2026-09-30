@@ -1,3 +1,5 @@
+#OCT (univariate) MILP formulation based on Bertismas & Dunn (2017)
+
 import numpy as np
 import pyomo.environ as pyo
 import gurobipy as gp
