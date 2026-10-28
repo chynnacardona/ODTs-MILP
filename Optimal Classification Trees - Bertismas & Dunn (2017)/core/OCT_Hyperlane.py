@@ -5,35 +5,39 @@ from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.linear_model import LogisticRegression
 
 class OCTH(BaseEstimator, ClassifierMixin):
-    def __init__(self, depth=2, aplha=0.01, time_limit=60, verbose=False):
+    def __init__(self, depth=2, alpha=0.01, time_limit=60, verbose=False):
+        self.depth = depth
         self.max_depth = depth
-        self.alpha = aplha
+        self.alpha = alpha
         self.time_limit = time_limit
         self.verbose = verbose
 
         self.model = None
-        self.classes = None
+        self.classes_ = None
         self.n_features_in_ = 0
         self.tree_structure_ = {}
 
-    def _normalize(self, X):
+    def normalize(self, X, dtype=np.float64):
         # Normalizes input features to [0, 1] range required for Big-M bounds.
-        X_min = np.min(X, axis=0)
-        X_max = np.max(X, axis=0)
+        X_arr = np.asarray(X, dtype=dtype)
+        X_min = np.min(X_arr, axis=0)
+        X_max = np.max(X_arr, axis=0)
         range_val = np.where((X_max - X_min) == 0, 1.0, X_max - X_min)
-        return (X - X_min) / range_val
+        return (X_arr - X_min) / range_val
+
+    _normalize = normalize
 
     def _generate_warmstart(self, X, y_idx, K):
         # Generated initial warm start values (top-down greedy multivariate split (sect 4.2))
-        num_branch = 2 ** self.depth - 1
-        num_leaf = 2 ** self.depth
+        num_branch = 2 ** self.max_depth - 1
+        num_leaf = 2 ** self.max_depth
         n_samples, n_features = X.shape
 
         # Decision Variables init
         a_init = {}
         b_init = {}
-        d_init = {t: 0 for t in range(1, num_leaf + 1)}
-        z_init = np.zeros((n_samples, num_branch + num_leaf + 1))
+        d_init = {t: 0 for t in range(1, num_branch + 1)}
+        z_init = np.zeros((num_branch + num_leaf + 1, n_samples))
         l_init = {t: 0 for t in range(num_branch + 1, num_branch + num_leaf + 1)}
         c_init = {
             (k, t): 0
@@ -52,7 +56,10 @@ class OCTH(BaseEstimator, ClassifierMixin):
             if len(indices) > 0 and len(np.unique(y_idx[indices])) > 1:
                 # Fit a sparse linear split via L1-regularized Logistic Regression
                 clf = LogisticRegression(
-                    penalty='l1', solver="liblinear", C=1.0, random_state=42
+                    solver="liblinear",
+                    l1_ratio=1.0, 
+                    C=1.0,
+                    random_state=42
                 )
                 clf.fit(X[indices], y_idx[indices])
 
@@ -60,21 +67,21 @@ class OCTH(BaseEstimator, ClassifierMixin):
                 intercept = clf.intercept_[0]
 
                 # Normalize weights and intercept to satisfy L1 norm <= 1
-                norm_factor = np.sum(np.abs(weight) + np.abs(intercept))
+                norm_factor = np.sum(np.abs(weight)) + np.abs(intercept)
                 if norm_factor > 0:
-                    weights = weights / norm_factor
+                    weight = weight / norm_factor
                     intercept = intercept / norm_factor
                 else:
-                    weights[0] = 0.5
-                    intercept[0] = 0.5
+                    weight = np.full_like(weight, 0.5)
+                    intercept = 0.5
 
                 d_init[t] = 1
                 for j in range(n_features):
-                    a_init[(t, j)] = weights[j]
+                    a_init[(t, j)] = weight[j]
                 b_init[t] = intercept
 
                 # Route samples to child nodes
-                left_mask = (X[indices] @ weights + intercept) < 0
+                left_mask = (X[indices] @ weight + intercept) < 0
                 node_samples[2 * t] = indices[left_mask]
                 node_samples[2 * t + 1] = indices[~left_mask]
             else:
@@ -97,12 +104,12 @@ class OCTH(BaseEstimator, ClassifierMixin):
                 # Majority class assignment
                 counts = np.bincount(y_idx[indices], minlength=K)
                 maj_class = np.argmax(counts)
-                c_init[(t, maj_class)] = 1
+                c_init[(maj_class, t)] = 1
             else:
                 l_init[t] = 0
                 c_init[(0, t)] = 1
 
-            return a_init, b_init, d_init, l_init, z_init, c_init
+        return a_init, b_init, d_init, l_init, z_init, c_init
 
     def fit(self, X, y):
         # Build an OCT-H model from the training set (X, y)
@@ -117,8 +124,8 @@ class OCTH(BaseEstimator, ClassifierMixin):
         n_samples, n_features = X_norm.shape
         self.n_features_in_ = n_features
 
-        num_branch = 2 ** self.depth - 1
-        num_leaf = 2 ** self.depth
+        num_branch = 2 ** self.max_depth - 1
+        num_leaf = 2 ** self.max_depth
 
         T_branch = list(range(1, num_branch + 1))
         T_leaf = list(
@@ -157,6 +164,7 @@ class OCTH(BaseEstimator, ClassifierMixin):
         if not self.verbose:
             self.model.Params.OutputFlag = 0
         self.model.Params.TimeLimit = self.time_limit
+        self.model.Params.MIPFocus = 1
 
         # 1. Variables
         a = self.model.addVars(
@@ -203,10 +211,10 @@ class OCTH(BaseEstimator, ClassifierMixin):
             a_w,
             b_w,
             d_w,
-            z_w,
             l_w,
+            z_w,
             c_w,
-        ) = self._generate_greedy_warmstart(X_norm, y_idx, K)
+        ) = self._generate_warmstart(X_norm, y_idx, K)
 
         for (t, j), val in a_w.items():
             a[t, j].Start = val
@@ -219,7 +227,7 @@ class OCTH(BaseEstimator, ClassifierMixin):
         for t in T_leaf:
             l_leaf[t].Start = l_w[t]
             for i in range(n_samples):
-                z[i, t].Start = z_w[i, t]
+                z[i, t].Start = z_w[t, i]
             for k_idx in range(K):
                 c[k_idx, t].Start = c_w[(k_idx, t)]
 
@@ -366,4 +374,3 @@ class OCTH(BaseEstimator, ClassifierMixin):
             predictions.append(self.tree_structure_[curr_node]["class"])
 
         return np.array(predictions)
-
