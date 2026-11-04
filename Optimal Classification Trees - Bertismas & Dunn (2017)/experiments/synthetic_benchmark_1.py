@@ -177,10 +177,12 @@ def run_benchmark():
             metrics['OCT (Standard)']['size'].append(oct_m['tree_size'])
             metrics['OCT (Standard)']['max_d'].append(oct_m['max_depth'])
 
-            # 4. Ground Truth
+            # 4. Ground Truth - Empirical Averaging
+            gt_size = gt.count_leaves() if hasattr(gt, 'count_leaves') else (2 ** D)
+
             metrics['Ground Truth']['in'].append(100.0)
             metrics['Ground Truth']['out'].append(100.0)
-            metrics['Ground Truth']['size'].append(2**D)
+            metrics['Ground Truth']['size'].append(gt_size)
             metrics['Ground Truth']['max_d'].append(D)
 
         # Print aggregated results as Mean ± Std Dev
