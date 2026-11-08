@@ -53,7 +53,7 @@ class StandardOCT(BaseEstimator, ClassifierMixin):
         # Safety caps to prevent deep trees (depth 4, 5) from hanging
         model.Params.TimeLimit = self.time_limit 
         model.Params.MIPFocus = 1           # Focus on finding feasible solutions fast
-        model.Params.MIPGap = 0.05          # 5% gap tolerance to speed up convergence
+        model.Params.MIPGap = 0.01          # 5% gap tolerance to speed up convergence
         model.Params.Presolve = 2
 
         # Decision Variables

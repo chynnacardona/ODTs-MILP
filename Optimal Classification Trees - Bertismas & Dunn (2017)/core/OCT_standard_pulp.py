@@ -8,7 +8,7 @@ class StandardOCT(BaseEstimator, ClassifierMixin):
     True Global Optimal Classification Tree (Bertsimas & Dunn 2017)
     Powered by PuLP and the open-source CBC MILP solver with safety timeouts.
     """
-    def __init__(self, depth=2, alpha=0.0001, time_limit=20, verbose=False):
+    def __init__(self, depth=2, alpha=0.0001, time_limit=60, verbose=False):
         self.max_depth = depth
         self.alpha = alpha
         self.time_limit = time_limit
@@ -55,7 +55,6 @@ class StandardOCT(BaseEstimator, ClassifierMixin):
         z = model.add_variable_dict("z", (range(N), leaves), lowBound=0, upBound=1, cat='Binary')
         L = model.add_variable_dict("L", leaves, lowBound=0.0, cat='Continuous')
            
-
         # Explicit Bounds & Branch Constraints
         for t in branches:
             model += (pulp.lpSum(a[t, j] for j in range(P)) == d[t])
@@ -70,7 +69,6 @@ class StandardOCT(BaseEstimator, ClassifierMixin):
         for t in leaves:
             model += (L[t] >= 0.0)   # Lower bound for L
 
-        # Constraints
         for t in branches:
             model += (pulp.lpSum(a[t, j] for j in range(P)) == d[t])
             model += (b[t] <= 2.0 * d[t])
@@ -85,20 +83,23 @@ class StandardOCT(BaseEstimator, ClassifierMixin):
         for i in range(N):
             model += (pulp.lpSum(z[i, t] for t in leaves) == 1)
 
+        # Strict linear Big-M formulation avoiding non-constant multiplications
         eps = 1e-3
-        M = float(np.max(np.abs(X_arr))) + 5.0
+        feature_ranges = np.max(X_arr, axis=0) - np.min(X_arr, axis=0)
+        M_global = float(np.max(feature_ranges)) + 5.0
+
         for t in leaves:
             left_ancestors, right_ancestors = get_ancestors(t)
             for i in range(N):
                 for m in left_ancestors:
                     model += (
                         pulp.lpSum(a[m, j] * X_arr[i, j] for j in range(P))
-                        <= b[m] + M * (1 - z[i, t])
+                        <= b[m] + M_global * (1 - z[i, t])
                     )
                 for m in right_ancestors:
                     model += (
                         pulp.lpSum(a[m, j] * X_arr[i, j] for j in range(P))
-                        >= b[m] + eps - M * (1 - z[i, t])
+                        >= b[m] + eps - M_global * (1 - z[i, t])
                     )
 
         for t in leaves:
@@ -123,7 +124,6 @@ class StandardOCT(BaseEstimator, ClassifierMixin):
         stats = model.solve(solver)
 
         # Fallback safeguard if solver times out or fails to find a solution
-        # Fallback safeguard for PuLP 4.x status checking
         self.tree_structure_ = {}
         status_str = getattr(stats, 'status_str', str(stats))
         if status_str not in ['Optimal', 'Feasible'] and all(pulp.value(L[t]) is None for t in leaves):
