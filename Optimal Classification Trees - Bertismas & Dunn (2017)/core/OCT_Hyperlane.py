@@ -56,7 +56,8 @@ class OCTH(BaseEstimator, ClassifierMixin):
             if len(indices) > 0 and len(np.unique(y_idx[indices])) > 1:
                 # Fit a sparse linear split via L1-regularized Logistic Regression
                 clf = LogisticRegression(
-                    solver="liblinear",
+                    solver="saga",
+                    penalty="l1",
                     l1_ratio=1.0, 
                     C=1.0,
                     random_state=42
@@ -163,7 +164,7 @@ class OCTH(BaseEstimator, ClassifierMixin):
         self.model = gp.Model("OCT_H")
         if not self.verbose:
             self.model.Params.OutputFlag = 0
-        self.model.Params.TimeLimit = self.time_limit
+        self.model.Params.TimeLimit = 60
         self.model.Params.MIPFocus = 1
 
         # 1. Variables
