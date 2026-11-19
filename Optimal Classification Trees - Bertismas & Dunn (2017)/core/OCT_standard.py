@@ -1,9 +1,17 @@
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+for path in (HERE, HERE.parent):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+        
 import numpy as np
 import gurobipy as gp
 from gurobipy import GRB
-import pulp
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.tree import DecisionTreeClassifier
+from WarmStartMapper import WarmStartMapper
 
 class StandardOCT(BaseEstimator, ClassifierMixin):
     """
@@ -65,20 +73,36 @@ class StandardOCT(BaseEstimator, ClassifierMixin):
         L = model.addVars(leaves, vtype=GRB.CONTINUOUS, lb=0.0, name="L")
 
         try:
-            # Fit a quick sklearn tree to extract heuristic splits
             warm_cart = DecisionTreeClassifier(max_depth=self.max_depth, random_state=42)
             warm_cart.fit(X_arr, y_indexed)
-            
-            # Set initial starting hints for Gurobi variables
-            for t in branches:
-                d[t].Start = 0.0
-                b[t].Start = 0.0
-                for j in range(P):
-                    a[t, j].Start = 0.0
-            
-            # Activate root node hint
-            if len(branches) > 0:
-                d[0].Start = 1.0
+
+            mapper = WarmStartMapper(max_depth=self.max_depth, n_features=P, n_classes=K)
+            warm_start = mapper.extract_cart_parameters(warm_cart, X_arr)
+
+            for (t_1based, j), val in warm_start.get("a", {}).items():
+                t_0 = t_1based - 1
+                if t_0 in branches and j < P:
+                    a[t_0, j].Start = val
+
+            for t_1based, val in warm_start.get("b", {}).items():
+                t_0 = t_1based - 1
+                if t_0 in branches:
+                    b[t_0].Start = val
+
+            for t_1based, val in warm_start.get("d", {}).items():
+                t_0 = t_1based - 1
+                if t_0 in branches:
+                    d[t_0].Start = val
+
+            for (k, t_1based), val in warm_start.get("c", {}).items():
+                t_0 = t_1based - 1
+                if t_0 in leaves:
+                    c[k, t_0].Start = val
+
+            for (i, t_1based), val in warm_start.get("z", {}).items():
+                t_0 = t_1based - 1
+                if t_0 in leaves:
+                    z[i, t_0].Start = val
         except Exception:
             pass
         

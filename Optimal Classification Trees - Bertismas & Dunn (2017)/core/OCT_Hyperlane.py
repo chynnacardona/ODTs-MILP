@@ -15,17 +15,26 @@ class OCTH(BaseEstimator, ClassifierMixin):
         self.model = None
         self.classes_ = None
         self.n_features_in_ = 0
+        self.X_min_ = None
+        self.range_val_ = None
         self.tree_structure_ = {}
 
-    def normalize(self, X, dtype=np.float64):
+    def _fit_normalize(self, X, dtype=np.float64):
         # Normalizes input features to [0, 1] range required for Big-M bounds.
         X_arr = np.asarray(X, dtype=dtype)
-        X_min = np.min(X_arr, axis=0)
-        X_max = np.max(X_arr, axis=0)
-        range_val = np.where((X_max - X_min) == 0, 1.0, X_max - X_min)
-        return (X_arr - X_min) / range_val
 
-    _normalize = normalize
+        self.X_min_ = np.min(X_arr, axis=0)
+        X_max = np.max(X_arr, axis=0)
+        range_val = np.where((X_max - self.X_min_) == 0, 1.0, X_max - self.X_min_)
+        self.range_val_ = range_val
+        return (X_arr - self.X_min_) / range_val
+
+    def _transform_normalize(self, X, dtype=np.float64):
+        """Applies training-set min/max scaling to test data (prevents data leakage)."""
+        X_arr = np.asarray(X, dtype=dtype)
+        if self.X_min_ is None or self.range_val_ is None:
+            return self._fit_normalize(X_arr, dtype=dtype)
+        return (X_arr - self.X_min_) / self.range_val_
 
     def _generate_warmstart(self, X, y_idx, K):
         # Generated initial warm start values (top-down greedy multivariate split (sect 4.2))
@@ -60,7 +69,8 @@ class OCTH(BaseEstimator, ClassifierMixin):
                     penalty="l1",
                     l1_ratio=1.0, 
                     C=1.0,
-                    random_state=42
+                    max_iter=500,
+                    random_state=42,
                 )
                 clf.fit(X[indices], y_idx[indices])
 
@@ -73,8 +83,10 @@ class OCTH(BaseEstimator, ClassifierMixin):
                     weight = weight / norm_factor
                     intercept = intercept / norm_factor
                 else:
-                    weight = np.full_like(weight, 0.5)
-                    intercept = 0.5
+                    # [MODIFIED] Fallback split that strictly satisfies ||a||_1 + |b| <= 1
+                    weight = np.zeros(n_features)
+                    weight[0] = 0.5
+                    intercept = 0.25
 
                 d_init[t] = 1
                 for j in range(n_features):
@@ -114,7 +126,7 @@ class OCTH(BaseEstimator, ClassifierMixin):
 
     def fit(self, X, y):
         # Build an OCT-H model from the training set (X, y)
-        X_norm = self.normalize(X, dtype=np.float64)
+        X_norm = self._fit_normalize(X, dtype=np.float64)
         y_arr = np.asarray(y)
 
         self.classes_ = np.unique(y_arr)
@@ -166,71 +178,52 @@ class OCTH(BaseEstimator, ClassifierMixin):
             self.model.Params.OutputFlag = 0
         self.model.Params.TimeLimit = 60
         self.model.Params.MIPFocus = 1
+        self.model.Params.MIPGap = 0.05
 
         # 1. Variables
-        a = self.model.addVars(
-            T_branch,
-            range(n_features),
-            lb=-1.0,
-            ub=1.0,
-            vtype=GRB.CONTINUOUS,
-            name="a",
-        )
-        b = self.model.addVars(
-            T_branch, lb=-1.0, ub=1.0, vtype=GRB.CONTINUOUS, name="b"
-        )
-
-        hat_a = self.model.addVars(
-            T_branch,
-            range(n_features),
-            lb=0.0,
-            ub=1.0,
-            vtype=GRB.CONTINUOUS,
-            name="hat_a",
-        )
-        hat_b = self.model.addVars(
-            T_branch, lb=0.0, ub=1.0, vtype=GRB.CONTINUOUS, name="hat_b"
-        )
+        a = self.model.addVars(T_branch, range(n_features), lb=-1.0, ub=1.0, vtype=GRB.CONTINUOUS, name="a")
+        b = self.model.addVars(T_branch, lb=-1.0, ub=1.0, vtype=GRB.CONTINUOUS, name="b")
+        hat_a = self.model.addVars(T_branch, range(n_features), lb=0.0, ub=1.0, vtype=GRB.CONTINUOUS, name="hat_a")
+        hat_b = self.model.addVars(T_branch, lb=0.0, ub=1.0, vtype=GRB.CONTINUOUS, name="hat_b")
 
         d = self.model.addVars(T_branch, vtype=GRB.BINARY, name="d")
         l_leaf = self.model.addVars(T_leaf, vtype=GRB.BINARY, name="l")
         c = self.model.addVars(range(K), T_leaf, vtype=GRB.BINARY, name="c")
-        z = self.model.addVars(
-            range(n_samples), T_leaf, vtype=GRB.BINARY, name="z"
-        )
-        L = self.model.addVars(
-            T_leaf, lb=0.0, vtype=GRB.CONTINUOUS, name="L"
-        )
+        z = self.model.addVars(range(n_samples), T_leaf, vtype=GRB.BINARY, name="z")
+        L = self.model.addVars(T_leaf, lb=0.0, vtype=GRB.CONTINUOUS, name="L")
 
-        s_a = self.model.addVars(
-            T_branch, range(n_features), vtype=GRB.BINARY, name="s_a"
-        )
+        s_a = self.model.addVars(T_branch, range(n_features), vtype=GRB.BINARY, name="s_a")
         s_b = self.model.addVars(T_branch, vtype=GRB.BINARY, name="s_b")
 
         # 2. Inject Warm Start Variables (Sec 4.2)
-        (
-            a_w,
-            b_w,
-            d_w,
-            l_w,
-            z_w,
-            c_w,
-        ) = self._generate_warmstart(X_norm, y_idx, K)
+        try:
+            (
+                a_w,
+                b_w,
+                d_w,
+                l_w,
+                z_w,
+                c_w,
+            ) = self._generate_warmstart(X_norm, y_idx, K)
 
-        for (t, j), val in a_w.items():
-            a[t, j].Start = val
-            hat_a[t, j].Start = abs(val)
-        for t, val in b_w.items():
-            b[t].Start = val
-            hat_b[t].Start = abs(val)
-        for t, val in d_w.items():
-            d[t].Start = val
-        for t in T_leaf:
-            l_leaf[t].Start = l_w[t]
-            for i in range(n_samples):
-                z[i, t].Start = z_w[t, i]
-            for k_idx in range(K):
-                c[k_idx, t].Start = c_w[(k_idx, t)]
+            for (t, j), val in a_w.items():
+                a[t, j].Start = val
+                hat_a[t, j].Start = abs(val)
+                s_a[t, j].Start = 1.0 if val >= 0 else 0.0
+            for t, val in b_w.items():
+                b[t].Start = val
+                hat_b[t].Start = abs(val)
+                s_b[t].Start = 1.0 if val >= 0 else 0.0
+            for t, val in d_w.items():
+                d[t].Start = val
+            for t in T_leaf:
+                l_leaf[t].Start = l_w[t]
+                for i in range(n_samples):
+                    z[i, t].Start = z_w[t, i]
+                for k_idx in range(K):
+                    c[k_idx, t].Start = c_w[(k_idx, t)]
+        except Exception:
+            pass
 
         # 3. Objective Function
         self.model.setObjective(
@@ -327,6 +320,12 @@ class OCTH(BaseEstimator, ClassifierMixin):
         self.model.optimize()
 
         # Extract Optimal Tree Structure Parameters
+        self.tree_structure_ = {}
+        if self.model.SolCount == 0:
+            maj_class = self.classes_[int(np.argmax(np.bincount(y_idx)))]
+            self.tree_structure_[1] = {"l": True, "class": maj_class}
+            return self
+
         for t in T_branch:
             self.tree_structure_[t] = {
                 "d": d[t].X > 0.5,
@@ -334,23 +333,17 @@ class OCTH(BaseEstimator, ClassifierMixin):
                 "b": b[t].X,
             }
         for t in T_leaf:
-            assigned_class = [
-                k_idx for k_idx in range(K) if c[k_idx, t].X > 0.5
-            ]
+            assigned_class = [k_idx for k_idx in range(K) if c[k_idx, t].X > 0.5]
             self.tree_structure_[t] = {
                 "l": l_leaf[t].X > 0.5,
-                "class": (
-                    self.classes_[assigned_class[0]]
-                    if len(assigned_class) > 0
-                    else self.classes_[0]
-                ),
+                "class": self.classes_[assigned_class[0]] if len(assigned_class) > 0 else self.classes_[0],
             }
 
         return self
 
     def predict(self, X):
         """Predict class labels for samples in X."""
-        X_norm = self._normalize(np.asarray(X, dtype=np.float64))
+        X_norm = self._transform_normalize(np.asarray(X, dtype=np.float64))
         n_samples = X_norm.shape[0]
         predictions = []
 
